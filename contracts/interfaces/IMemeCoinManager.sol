@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.17;
+pragma solidity 0.8.20;
 import {DataTypes} from "../libraries/DataTypes.sol";
 
 interface IMemeCoinManager {
@@ -14,12 +14,6 @@ interface IMemeCoinManager {
     function addLiquidityForMemeCoin(
         address memeCoinAddr,
         uint256 tokenAmount
-    ) external payable returns (bool);
-
-    function removeLiquidityForEmergece(
-        uint256 tokenId,
-        uint128 liquidity,
-        address receiptAddress
     ) external payable returns (bool);
 
     function getCreatMemeCoinParam()

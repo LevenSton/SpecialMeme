@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.17;
+pragma solidity 0.8.20;
 
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {DataTypes} from "./libraries/DataTypes.sol";
 import {INonfungiblePositionManager} from "./interfaces/INonfungiblePositionManager.sol";
 import {Math} from "./libraries/Math.sol";
@@ -45,12 +46,11 @@ contract MemeCoinManager is IMemeCoinManager {
         uint256 amount1
     );
 
+    address public constant DEAD = address(0xdEaD);
+
     bool public _canCreateMemeCoin;
     uint256 public _maxPurchasePercentageForCreator; //defaule 1000 as 10%
     uint256 public _maxPreSaleTime; //defaule 7 days
-    uint256 public _protocolPercentage; //default 10% of liquidity reward
-    address public _daoContractAddr;
-    address public _protocolFeeAddress;
     address public _owner;
 
     DataTypes.SwapRouter private _swapRouter;
@@ -99,9 +99,6 @@ contract MemeCoinManager is IMemeCoinManager {
 
         _maxPreSaleTime = 7 * 24 * 60 * 60;
         _maxPurchasePercentageForCreator = 1000;
-        _protocolPercentage = 1000;
-        _protocolFeeAddress = msg.sender;
-        _daoContractAddr = msg.sender;
         _canCreateMemeCoin = true;
     }
 
@@ -136,10 +133,15 @@ contract MemeCoinManager is IMemeCoinManager {
         address v3NonfungiblePositionManagerAddress = _swapRouter
             .uniswapV3NonfungiblePositionManager;
 
-        _mintLiquidity(
+        uint256 tokenId = _mintLiquidity(
             memeCoinAddr,
             v3NonfungiblePositionManagerAddress,
             tokenAmount
+        );
+        IERC721(v3NonfungiblePositionManagerAddress).transferFrom(
+            address(this),
+            DEAD,
+            tokenId
         );
         uint256 leftToken = IMemeCoin(memeCoinAddr).balanceOf(address(this));
         address creator = IMemeCoin(memeCoinAddr).creator();
@@ -159,103 +161,6 @@ contract MemeCoinManager is IMemeCoinManager {
         return true;
     }
 
-    //collect liqiudity reward
-    function collect(
-        address memeCoinAddr,
-        uint256 tokenId
-    ) public returns (uint256 amount0, uint256 amount1) {
-        address v3NonfungiblePositionManagerAddress = _swapRouter
-            .uniswapV3NonfungiblePositionManager;
-        (amount0, amount1) = INonfungiblePositionManager(
-            v3NonfungiblePositionManagerAddress
-        ).collect(
-                INonfungiblePositionManager.CollectParams({
-                    tokenId: tokenId,
-                    recipient: address(this),
-                    amount0Max: type(uint128).max,
-                    amount1Max: type(uint128).max
-                })
-            );
-
-        uint256 tokenReward = IMemeCoin(memeCoinAddr).balanceOf(address(this));
-        address _weth = INonfungiblePositionManager(
-            v3NonfungiblePositionManagerAddress
-        ).WETH9();
-        uint256 ethReward = IWETH9(_weth).balanceOf(address(this));
-
-        address creator = IMemeCoin(memeCoinAddr).creator();
-        if (tokenReward > 0) {
-            uint256 feeProtocol = (tokenReward * _protocolPercentage) / 10000;
-            TransferHelper.safeTransfer(
-                memeCoinAddr,
-                _protocolFeeAddress,
-                feeProtocol
-            );
-            TransferHelper.safeTransfer(
-                memeCoinAddr,
-                creator,
-                tokenReward - feeProtocol
-            );
-        }
-        if (ethReward > 0) {
-            IWETH9(_weth).withdraw(ethReward);
-            uint256 feeProtocol = (ethReward * _protocolPercentage) / 10000;
-            (bool success, ) = payable(_protocolFeeAddress).call{
-                value: feeProtocol
-            }("");
-            (bool success1, ) = payable(creator).call{
-                value: ethReward - feeProtocol
-            }("");
-            if (!success || !success1) {
-                revert SendETHFailed();
-            }
-        }
-        emit CollectLiquidityReward(memeCoinAddr, tokenId, amount0, amount1);
-    }
-
-    /// remove liquidity for emergece, just call by DAO
-    /**
-     *
-     * @param tokenId position nft id
-     * @param liquidity liquidity amount
-     * @param receiptAddress receiptAddress to receive token and weth
-     * Be care of receiptAddress, if it's a contract, it must have ablity to do with token and weth
-     */
-    function removeLiquidityForEmergece(
-        uint256 tokenId,
-        uint128 liquidity,
-        address receiptAddress
-    ) external payable override returns (bool) {
-        if (msg.sender != _daoContractAddr) {
-            revert JustCanBeCallByDaoAddress();
-        }
-        address v3NonfungiblePositionManagerAddress = _swapRouter
-            .uniswapV3NonfungiblePositionManager;
-        INonfungiblePositionManager(v3NonfungiblePositionManagerAddress)
-            .decreaseLiquidity(
-                INonfungiblePositionManager.DecreaseLiquidityParams({
-                    tokenId: tokenId,
-                    liquidity: liquidity,
-                    amount0Min: 0,
-                    amount1Min: 0,
-                    deadline: block.timestamp
-                })
-            );
-
-        (uint256 amount0, uint256 amount1) = INonfungiblePositionManager(
-            v3NonfungiblePositionManagerAddress
-        ).collect(
-                INonfungiblePositionManager.CollectParams({
-                    tokenId: tokenId,
-                    recipient: receiptAddress,
-                    amount0Max: type(uint128).max,
-                    amount1Max: type(uint128).max
-                })
-            );
-        emit RemoveLiquidityForEmergece(tokenId, liquidity, amount0, amount1);
-        return true;
-    }
-
     function setMaxReservePercentage(
         uint256 newPurchasePercentage
     ) public onlyOwner {
@@ -267,27 +172,6 @@ contract MemeCoinManager is IMemeCoinManager {
 
     function setMaxPreSaleTime(uint256 newMaxPreSaleTime) public onlyOwner {
         _maxPreSaleTime = newMaxPreSaleTime;
-    }
-
-    function setProtocolFeeAddress(address newAddress) public onlyOwner {
-        if (newAddress == address(0)) {
-            revert ZeroAddress();
-        }
-        _protocolFeeAddress = newAddress;
-    }
-
-    function setProtocolFeePercentage(uint256 newPercentage) public onlyOwner {
-        if (newPercentage > 10000) {
-            revert InvaildParam();
-        }
-        _protocolPercentage = newPercentage;
-    }
-
-    function setDaoContractAddr(address newAddr) public onlyOwner {
-        if (newAddr == address(0)) {
-            revert ZeroAddress();
-        }
-        _daoContractAddr = newAddr;
     }
 
     function setCreateMemeCoin(bool canCreate) public onlyOwner {
@@ -351,7 +235,7 @@ contract MemeCoinManager is IMemeCoinManager {
         address memeCoinAddr,
         address v3NonfungiblePositionManagerAddress,
         uint256 tokenAmount
-    ) internal {
+    ) internal returns (uint256) {
         address _weth = INonfungiblePositionManager(
             v3NonfungiblePositionManagerAddress
         ).WETH9();
@@ -360,36 +244,35 @@ contract MemeCoinManager is IMemeCoinManager {
             ? (memeCoinAddr, _weth, true)
             : (_weth, memeCoinAddr, false);
         uint256 ethValue = address(this).balance;
-        {
-            (
-                uint256 tokenId,
-                uint128 liquidity,
-                uint256 amount0,
-                uint256 amount1
-            ) = INonfungiblePositionManager(v3NonfungiblePositionManagerAddress)
-                    .mint{value: ethValue}(
-                    INonfungiblePositionManager.MintParams({
-                        token0: token0,
-                        token1: token1,
-                        fee: uint24(10_000),
-                        tickLower: int24(-887200),
-                        tickUpper: int24(887200),
-                        amount0Desired: zeroForOne ? tokenAmount : ethValue,
-                        amount1Desired: zeroForOne ? ethValue : tokenAmount,
-                        amount0Min: 0,
-                        amount1Min: 0,
-                        recipient: address(this),
-                        deadline: block.timestamp
-                    })
-                );
-
-            emit AddLiquidityAfterSoldOut(
-                memeCoinAddr,
-                tokenId,
-                liquidity,
-                amount0,
-                amount1
+        (
+            uint256 tokenId,
+            uint128 liquidity,
+            uint256 amount0,
+            uint256 amount1
+        ) = INonfungiblePositionManager(v3NonfungiblePositionManagerAddress)
+                .mint{value: ethValue}(
+                INonfungiblePositionManager.MintParams({
+                    token0: token0,
+                    token1: token1,
+                    fee: uint24(10_000),
+                    tickLower: int24(-887200),
+                    tickUpper: int24(887200),
+                    amount0Desired: zeroForOne ? tokenAmount : ethValue,
+                    amount1Desired: zeroForOne ? ethValue : tokenAmount,
+                    amount0Min: 0,
+                    amount1Min: 0,
+                    recipient: address(this),
+                    deadline: block.timestamp
+                })
             );
-        }
+
+        emit AddLiquidityAfterSoldOut(
+            memeCoinAddr,
+            tokenId,
+            liquidity,
+            amount0,
+            amount1
+        );
+        return tokenId;
     }
 }

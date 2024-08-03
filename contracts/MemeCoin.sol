@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.17;
+pragma solidity 0.8.20;
 
 import {ERC20} from "./ERC20.sol";
 import {IMemeCoinFactory} from "./interfaces/IMemeCoinFactory.sol";
+import {IUniswapV3Factory} from "./interfaces/IUniswapV3Factory.sol";
+import {IPeripheryImmutableState} from "./interfaces/IPeripheryImmutableState.sol";
 import {IMemeCoinManager} from "./interfaces/IMemeCoinManager.sol";
 import {INonfungiblePositionManager} from "./interfaces/INonfungiblePositionManager.sol";
 import {DataTypes} from "./libraries/DataTypes.sol";
-import {LibCaculatePair} from "./libraries/LibCaculatePair.sol";
+import {TxFeeSplitter} from "./libraries/TxFeeSplitter.sol";
 
-contract MemeCoin is ERC20 {
+contract MemeCoin is TxFeeSplitter, ERC20 {
     error InvaildParam();
     error ReachMaxPerMint();
     error SoldOut();
@@ -26,7 +28,11 @@ contract MemeCoin is ERC20 {
     address public creator;
     bool public enableTrading;
 
+    uint256 public constant tradingFeePercentage = 200; // 2%
+    address public constant uniV3RouterAddress = address(0x0); //need change
+
     mapping(address => uint) private mintAccount;
+    address public poolAddress;
 
     function initialized(
         DataTypes.CreateMemeCoinParameters memory vars
@@ -39,6 +45,8 @@ contract MemeCoin is ERC20 {
 
         if (vars.reserved > 0) {
             _mint(creator, vars.reserved);
+            _burn(creator, vars.reserved);
+            _addPayee(creator, vars.reserved);
         }
         _mint(memeCoinManager, vars.totalSupply - vars.reserved);
         preSaleAmountLeft = vars.totalSupply / 2 - vars.reserved;
@@ -50,6 +58,15 @@ contract MemeCoin is ERC20 {
         DataTypes.CreateMemeCoinParameters memory vars = IMemeCoinFactory(
             msg.sender
         ).parameters();
+
+        address fac = IPeripheryImmutableState(uniV3RouterAddress).factory();
+        address weth = IPeripheryImmutableState(uniV3RouterAddress).WETH9();
+
+        poolAddress = IUniswapV3Factory(fac).getPool(
+            address(this),
+            weth,
+            10000
+        );
 
         initialized(vars);
 
@@ -88,6 +105,8 @@ contract MemeCoin is ERC20 {
         preSaleAmountLeft -= mintAmount_;
 
         _transfer(memeCoinManager, msg.sender, mintAmount_);
+        _burn(msg.sender, mintAmount_);
+        _addPayee(msg.sender, mintAmount_);
 
         //refund if pay more
         if (msg.value > price) {
@@ -109,6 +128,17 @@ contract MemeCoin is ERC20 {
             }(address(this), balanceOf(memeCoinManager));
         }
 
+        return true;
+    }
+
+    function burnToken2ShareTxFee(
+        uint256 mintAmount_
+    ) public payable virtual returns (bool) {
+        if (mintAmount_ == 0) {
+            revert InvaildParam();
+        }
+        _burn(msg.sender, mintAmount_);
+        _addPayee(msg.sender, mintAmount_);
         return true;
     }
 
@@ -139,7 +169,20 @@ contract MemeCoin is ERC20 {
         if (!enableTrading) {
             revert TradingNotEnable();
         }
-        return super.transfer(to, value);
+        uint256 feePercentage = 0;
+        bool buying = msg.sender == poolAddress && to != uniV3RouterAddress;
+        bool selling = msg.sender != uniV3RouterAddress && to == poolAddress;
+        if (buying || selling) {
+            feePercentage = tradingFeePercentage;
+        }
+        if (feePercentage > 0) {
+            uint256 fee = (value * feePercentage) / 10000;
+            super._transfer(msg.sender, address(this), fee);
+            super._transfer(msg.sender, to, value - fee);
+        } else {
+            super.transfer(to, value);
+        }
+        return true;
     }
 
     function transferFrom(
@@ -150,6 +193,20 @@ contract MemeCoin is ERC20 {
         if (!enableTrading) {
             revert TradingNotEnable();
         }
-        return super.transferFrom(from, to, value);
+        uint256 feePercentage = 0;
+        bool buying = from == poolAddress && to != uniV3RouterAddress;
+        bool selling = from != uniV3RouterAddress && to == poolAddress;
+        if (buying || selling) {
+            feePercentage = tradingFeePercentage;
+        }
+
+        if (feePercentage > 0) {
+            uint256 fee = (value * feePercentage) / 10000;
+            super.transferFrom(from, address(this), fee);
+            super.transferFrom(from, to, value - fee);
+        } else {
+            super.transferFrom(from, to, value);
+        }
+        return true;
     }
 }
